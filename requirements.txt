@@ -1,0 +1,39 @@
+# Core UI
+streamlit>=1.35.0
+streamlit-extras>=0.4.0
+
+# Document parsing
+PyMuPDF>=1.24.0
+python-docx>=1.1.0
+Pillow>=10.0.0
+pytesseract>=0.3.10
+
+# NLP & Embeddings
+sentence-transformers>=2.7.0
+spacy>=3.7.0
+
+# Vector store
+chromadb>=0.5.0
+
+# LLM
+openai>=1.30.0
+
+# Database
+# sqlite3 is stdlib
+
+# Export
+openpyxl>=3.1.0
+XlsxWriter>=3.2.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.7.0
+pandas>=2.2.0
+numpy>=1.26.0
+tqdm>=4.66.0
+python-multipart>=0.0.9
+hashlib2>=1.0.0
+
+# Optional: better text processing
+nltk>=3.8.0
+regex>=2024.4.16
