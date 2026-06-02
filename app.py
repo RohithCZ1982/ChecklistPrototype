@@ -35,6 +35,9 @@ def _inject_css(dark: bool = False) -> None:
     st.markdown(
         f"""
 <style>
+  /* hide Streamlit's auto-generated sidebar nav */
+  [data-testid="stSidebarNav"] {{ display: none !important; }}
+
   body {{ background-color: {bg}; color: {text}; }}
 
   .main-header {{
@@ -119,6 +122,10 @@ def _login_page() -> None:
 
 def _render_sidebar() -> None:
     with st.sidebar:
+        st.markdown(
+            "<style>[data-testid=\"stSidebarNav\"]{display:none!important}</style>",
+            unsafe_allow_html=True,
+        )
         st.markdown(f"## {APP_ICON} {APP_TITLE}")
         st.caption(f"v{__import__('config').APP_VERSION}")
         st.markdown(f"👤 Logged in as **{st.session_state.get('username', 'admin')}**")
@@ -140,6 +147,9 @@ def _render_sidebar() -> None:
         st.page_link("pages/3_📋_Template_Builder.py",      label="📋 Template Builder")
         st.page_link("pages/4_🔍_Search.py",                label="🔍 Search & Query")
         st.page_link("pages/5_📤_Export.py",                label="📤 Export")
+        st.page_link("pages/6_✅_Create_Checklist.py",          label="✅ Create Checklist")
+        st.page_link("pages/7_📝_Inspection.py",                label="📝 Inspection")
+        st.page_link("pages/8_📜_Conducted_Inspections.py",     label="📜 Conducted Inspections")
         st.divider()
         if st.button("🚪 Logout", use_container_width=True):
             st.session_state.clear()

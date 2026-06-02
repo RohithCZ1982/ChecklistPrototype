@@ -31,6 +31,10 @@ def _require_auth():
 
 def _sidebar():
     with st.sidebar:
+        st.markdown(
+            "<style>[data-testid=\"stSidebarNav\"]{display:none!important}</style>",
+            unsafe_allow_html=True,
+        )
         st.markdown(f"## {APP_ICON} {APP_TITLE}")
         st.page_link("app.py",                              label="🏠 Home")
         st.page_link("pages/1_📊_Dashboard.py",             label="📊 Dashboard")
@@ -38,6 +42,9 @@ def _sidebar():
         st.page_link("pages/3_📋_Template_Builder.py",      label="📋 Template Builder")
         st.page_link("pages/4_🔍_Search.py",                label="🔍 Search & Query")
         st.page_link("pages/5_📤_Export.py",                label="📤 Export")
+        st.page_link("pages/6_✅_Create_Checklist.py",          label="✅ Create Checklist")
+        st.page_link("pages/7_📝_Inspection.py",                label="📝 Inspection")
+        st.page_link("pages/8_📜_Conducted_Inspections.py",     label="📜 Conducted Inspections")
         st.divider()
         if st.button("🚪 Logout"):
             st.session_state.clear()

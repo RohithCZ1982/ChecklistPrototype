@@ -79,6 +79,25 @@ def init_db() -> None:
             FOREIGN KEY (template_id) REFERENCES templates(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS checklists (
+            id           TEXT PRIMARY KEY,
+            name         TEXT NOT NULL UNIQUE,
+            description  TEXT,
+            template_ids TEXT NOT NULL,
+            created_date TEXT NOT NULL,
+            updated_date TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS inspections (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            checklist_id    TEXT NOT NULL,
+            checklist_name  TEXT,
+            inspection_date TEXT NOT NULL,
+            results         TEXT NOT NULL,
+            created_date    TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS entities (
             id           TEXT PRIMARY KEY,
             document_id  TEXT NOT NULL,
@@ -232,29 +251,32 @@ def get_chunks(document_id: str) -> List[Dict]:
 def keyword_search_chunks(
     query: str, doc_ids: Optional[List[str]] = None, limit: int = 20
 ) -> List[Dict]:
-    """FTS5 keyword search over chunks."""
-    conn = get_connection()
-    safe_q = query.replace('"', '""')
-    if doc_ids:
-        placeholders = ",".join("?" * len(doc_ids))
-        rows = conn.execute(
-            f"""SELECT c.*, rank FROM chunks c
-                JOIN chunks_fts f ON c.id = f.id
-                WHERE chunks_fts MATCH ?
-                  AND c.document_id IN ({placeholders})
-                ORDER BY rank LIMIT ?""",
-            [f'"{safe_q}"'] + doc_ids + [limit],
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """SELECT c.*, rank FROM chunks c
-               JOIN chunks_fts f ON c.id = f.id
-               WHERE chunks_fts MATCH ?
-               ORDER BY rank LIMIT ?""",
-            (f'"{safe_q}"', limit),
-        ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    """FTS5 keyword search over chunks. Returns [] on any database error."""
+    try:
+        conn = get_connection()
+        safe_q = query.replace('"', '""')
+        if doc_ids:
+            placeholders = ",".join("?" * len(doc_ids))
+            rows = conn.execute(
+                f"""SELECT c.*, rank FROM chunks c
+                    JOIN chunks_fts f ON c.id = f.id
+                    WHERE chunks_fts MATCH ?
+                      AND c.document_id IN ({placeholders})
+                    ORDER BY rank LIMIT ?""",
+                [f'"{safe_q}"'] + doc_ids + [limit],
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT c.*, rank FROM chunks c
+                   JOIN chunks_fts f ON c.id = f.id
+                   WHERE chunks_fts MATCH ?
+                   ORDER BY rank LIMIT ?""",
+                (f'"{safe_q}"', limit),
+            ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except sqlite3.DatabaseError:
+        return []
 
 
 # ─── Templates ────────────────────────────────────────────────────────────────
@@ -405,6 +427,131 @@ def get_all_entities() -> List[Dict]:
 
 
 # ─── Stats ────────────────────────────────────────────────────────────────────
+
+# ─── Checklists ───────────────────────────────────────────────────────────────
+
+def add_checklist(name: str, description: str, template_ids: List[str]) -> str:
+    cid = str(uuid.uuid4())
+    now = datetime.utcnow().isoformat()
+    conn = get_connection()
+    conn.execute(
+        """INSERT INTO checklists (id, name, description, template_ids, created_date, updated_date)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (cid, name, description, json.dumps(template_ids), now, now),
+    )
+    conn.commit()
+    conn.close()
+    return cid
+
+
+def get_checklist(checklist_id: str) -> Optional[Dict]:
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM checklists WHERE id = ?", (checklist_id,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    c = dict(row)
+    c["template_ids"] = json.loads(c["template_ids"])
+    return c
+
+
+def list_checklists() -> List[Dict]:
+    conn = get_connection()
+    rows = conn.execute("SELECT * FROM checklists ORDER BY created_date DESC").fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        c = dict(r)
+        c["template_ids"] = json.loads(c["template_ids"])
+        result.append(c)
+    return result
+
+
+def update_checklist(checklist_id: str, name: str, description: str, template_ids: List[str]) -> None:
+    conn = get_connection()
+    conn.execute(
+        """UPDATE checklists SET name=?, description=?, template_ids=?, updated_date=?
+           WHERE id=?""",
+        (name, description, json.dumps(template_ids), datetime.utcnow().isoformat(), checklist_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_checklist(checklist_id: str) -> None:
+    conn = get_connection()
+    conn.execute("DELETE FROM checklists WHERE id = ?", (checklist_id,))
+    conn.commit()
+    conn.close()
+
+
+# ─── Inspections ──────────────────────────────────────────────────────────────
+
+def add_inspection(
+    name: str,
+    checklist_id: str,
+    checklist_name: str,
+    inspection_date: str,
+    results: Dict,
+) -> str:
+    iid = str(uuid.uuid4())
+    conn = get_connection()
+    conn.execute(
+        """INSERT INTO inspections
+           (id, name, checklist_id, checklist_name, inspection_date, results, created_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (iid, name, checklist_id, checklist_name, inspection_date, json.dumps(results), datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+    return iid
+
+
+def get_inspection(inspection_id: str) -> Optional[Dict]:
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM inspections WHERE id = ?", (inspection_id,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    r = dict(row)
+    r["results"] = json.loads(r["results"])
+    return r
+
+
+def list_inspections(checklist_id: Optional[str] = None) -> List[Dict]:
+    conn = get_connection()
+    if checklist_id:
+        rows = conn.execute(
+            "SELECT * FROM inspections WHERE checklist_id = ? ORDER BY inspection_date DESC",
+            (checklist_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM inspections ORDER BY inspection_date DESC"
+        ).fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        rec = dict(r)
+        rec["results"] = json.loads(rec["results"])
+        result.append(rec)
+    return result
+
+
+# ─── Stats ────────────────────────────────────────────────────────────────────
+
+def clear_all_data() -> None:
+    """
+    Wipe all data by deleting the SQLite file and recreating the schema.
+    This is safer than DELETE statements because FTS5 content tables can
+    become corrupted when the backing table is cleared independently.
+    """
+    try:
+        DB_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+    init_db()
+
 
 def get_stats() -> Dict[str, int]:
     conn = get_connection()

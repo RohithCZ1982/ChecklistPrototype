@@ -32,7 +32,6 @@ pandas>=2.2.0
 numpy>=1.26.0
 tqdm>=4.66.0
 python-multipart>=0.0.9
-hashlib2>=1.0.0
 
 # Optional: better text processing
 nltk>=3.8.0

@@ -13,18 +13,141 @@ from utils.helpers import clean_text, file_hash, regex_ner
 
 # ─── Text extraction ──────────────────────────────────────────────────────────
 
+def _rects_overlap(a, b) -> bool:
+    """True when rectangles (x0,y0,x1,y1) overlap."""
+    return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
+
+
+def _deduplicate_md_table(md: str) -> str:
+    """
+    PyMuPDF sometimes splits merged cells into phantom duplicate columns, e.g.
+    Col1/Test/Col3 all containing the same data.  This function:
+    - groups columns that have identical data across all rows
+    - within each group keeps the column with a meaningful header (not 'ColN')
+    - rebuilds the table with only unique columns
+    """
+    lines = [l for l in md.strip().split("\n") if l.strip()]
+    if len(lines) < 2:
+        return md
+
+    def _cells(line: str) -> list:
+        return [c.strip() for c in line.strip().strip("|").split("|")]
+
+    headers = _cells(lines[0])
+    body_rows: list = []
+    for line in lines[1:]:
+        if re.match(r"^\s*\|?[-:\s|]+\|?\s*$", line):
+            continue
+        body_rows.append(_cells(line))
+
+    if not body_rows:
+        return md
+
+    n = len(headers)
+    # Tuple of data values per column (bounded to header count)
+    col_data = [
+        tuple(row[ci] if ci < len(row) else "" for row in body_rows)
+        for ci in range(n)
+    ]
+
+    # Map each unique data-tuple to the preferred column index
+    _placeholder = re.compile(r"^Col\d+$", re.I)
+    data_to_col: dict = {}
+    for ci, data in enumerate(col_data):
+        if data not in data_to_col:
+            data_to_col[data] = ci
+        else:
+            prev = data_to_col[data]
+            prev_hdr = headers[prev] if prev < n else ""
+            curr_hdr = headers[ci] if ci < n else ""
+            # Prefer the named header over a placeholder
+            if _placeholder.match(prev_hdr) and not _placeholder.match(curr_hdr):
+                data_to_col[data] = ci
+
+    keep = sorted(set(data_to_col.values()))
+    if len(keep) == n:
+        return md  # nothing to remove
+
+    def _row(cells: list) -> str:
+        return "| " + " | ".join(cells[ci] if ci < len(cells) else "" for ci in keep) + " |"
+
+    sep = "| " + " | ".join(["---"] * len(keep)) + " |"
+    return "\n".join([_row(headers), sep] + [_row(r) for r in body_rows])
+
+
+def _table_caption(page, tab_bbox: tuple, max_gap: float = 60.0) -> str:
+    """
+    Return the text of the block sitting immediately above tab_bbox.
+    Only considers blocks within max_gap points that horizontally overlap the table.
+    This captures titles like "TABLE 302B.02 OTHER ACCEPTANCE CRITERIA" which
+    PyMuPDF's find_tables() excludes because they sit outside the cell grid.
+    """
+    table_top = tab_bbox[1]
+    best_gap = max_gap + 1.0
+    caption = ""
+    for blk in page.get_text("blocks", sort=True):
+        if blk[6] != 0:          # skip image blocks
+            continue
+        bx0, by0, bx1, by1 = blk[:4]
+        gap = table_top - by1    # positive = block is above table
+        if gap <= 0 or gap >= best_gap:
+            continue
+        # Block must overlap the table horizontally
+        if bx1 < tab_bbox[0] or bx0 > tab_bbox[2]:
+            continue
+        best_gap = gap
+        caption = blk[4].strip().replace("\n", " ")
+    return caption
+
+
 def extract_pdf(file_path: Path) -> Tuple[str, List[Tuple[int, str]], int]:
     """
     Returns (full_text, [(page_num, page_text), ...], page_count).
+    Tables are extracted as markdown chunks prefixed with their caption/title so
+    that searches for the table name (e.g. "TABLE 302B.02") find the right chunk.
+    Text blocks that belong to a detected table are excluded from regular-text
+    chunks to avoid duplicate flat-text hits.
     """
     try:
         import fitz  # PyMuPDF
         doc = fitz.open(str(file_path))
         pages = []
         for i, page in enumerate(doc, start=1):
-            text = page.get_text("text")
+            # ── Extract tables as markdown (with caption) ─────────────────────
+            table_bboxes: list = []
+            try:
+                finder = page.find_tables()
+                for tab in finder.tables:
+                    md = tab.to_markdown()
+                    if not md.strip():
+                        continue
+                    md = _deduplicate_md_table(md)  # remove phantom duplicate columns
+                    tab_bbox = tuple(tab.bbox)
+                    caption = _table_caption(page, tab_bbox)
+                    chunk = f"{caption}\n{md.strip()}" if caption else md.strip()
+                    pages.append((i, chunk))
+                    table_bboxes.append(tab_bbox)
+            except Exception:
+                pass  # find_tables not available or no tables found
+
+            # ── Regular text — skip blocks that belong to a detected table ────
+            if table_bboxes:
+                parts = []
+                for block in page.get_text("blocks", sort=True):
+                    if block[6] != 0:  # skip image blocks
+                        continue
+                    if any(_rects_overlap(block[:4], tb) for tb in table_bboxes):
+                        continue
+                    block_text = block[4].strip()
+                    if block_text:
+                        parts.append(block_text)
+                text = "\n\n".join(parts)
+            else:
+                text = page.get_text("text")
+
             if text.strip():
                 pages.append((i, clean_text(text)))
+
         full_text = "\n\n".join(t for _, t in pages)
         return full_text, pages, len(doc)
     except ImportError:
@@ -48,16 +171,21 @@ def extract_docx(file_path: Path) -> Tuple[str, List[Tuple[int, str]], int]:
             page_text = "\n".join(group)
             pages.append((i // page_size + 1, clean_text(page_text)))
 
-        # Also extract tables
-        table_texts = []
+        # Also extract tables as markdown
         for table in doc.tables:
+            rows = []
             for row in table.rows:
-                row_text = " | ".join(cell.text for cell in row.cells if cell.text.strip())
-                if row_text:
-                    table_texts.append(row_text)
-
-        if table_texts:
-            pages.append((len(pages) + 1, "TABLES:\n" + "\n".join(table_texts)))
+                cells = [cell.text.strip().replace("\n", " ") for cell in row.cells]
+                rows.append(cells)
+            if len(rows) >= 2:
+                # Build markdown table
+                max_cols = max(len(r) for r in rows)
+                rows = [r + [""] * (max_cols - len(r)) for r in rows]
+                header = "| " + " | ".join(rows[0]) + " |"
+                separator = "| " + " | ".join(["---"] * max_cols) + " |"
+                body = "\n".join("| " + " | ".join(r) + " |" for r in rows[1:])
+                md_table = f"{header}\n{separator}\n{body}"
+                pages.append((len(pages) + 1, md_table))
 
         full_text = clean_text("\n\n".join(t for _, t in pages))
         return full_text, pages, len(pages)

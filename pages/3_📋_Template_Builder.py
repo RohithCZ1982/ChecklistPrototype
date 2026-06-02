@@ -4,12 +4,14 @@ structured output by pulling relevant content from indexed documents.
 """
 
 import json
+import re
 
 import pandas as pd
 import streamlit as st
 
 from config import APP_ICON, APP_TITLE
 from modules.database import list_documents
+from modules.search_engine import global_search
 from modules.template_manager import (
     create_template,
     edit_template,
@@ -19,7 +21,7 @@ from modules.template_manager import (
     load_template,
     remove_template,
 )
-from utils.helpers import confidence_color, truncate
+from utils.helpers import confidence_color, is_markdown_table, truncate
 
 st.set_page_config(
     page_title=f"Template Builder – {APP_TITLE}", page_icon="📋", layout="wide"
@@ -41,6 +43,10 @@ def _require_auth():
 
 def _sidebar():
     with st.sidebar:
+        st.markdown(
+            "<style>[data-testid=\"stSidebarNav\"]{display:none!important}</style>",
+            unsafe_allow_html=True,
+        )
         st.markdown(f"## {APP_ICON} {APP_TITLE}")
         st.page_link("app.py",                              label="🏠 Home")
         st.page_link("pages/1_📊_Dashboard.py",             label="📊 Dashboard")
@@ -48,26 +54,85 @@ def _sidebar():
         st.page_link("pages/3_📋_Template_Builder.py",      label="📋 Template Builder")
         st.page_link("pages/4_🔍_Search.py",                label="🔍 Search & Query")
         st.page_link("pages/5_📤_Export.py",                label="📤 Export")
+        st.page_link("pages/6_✅_Create_Checklist.py",          label="✅ Create Checklist")
+        st.page_link("pages/7_📝_Inspection.py",                label="📝 Inspection")
+        st.page_link("pages/8_📜_Conducted_Inspections.py",     label="📜 Conducted Inspections")
         st.divider()
         if st.button("🚪 Logout"):
             st.session_state.clear()
             st.rerun()
 
 
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _render_table_if_detected(text: str) -> bool:
+    """
+    Detect a markdown-style table in text and render it as a dataframe.
+    Returns True if a table was found and rendered, False otherwise.
+    """
+    lines = [l for l in text.strip().split("\n") if l.strip()]
+    pipe_lines = [l for l in lines if "|" in l]
+    if len(pipe_lines) < 2:
+        return False
+    try:
+        data_rows = []
+        for line in pipe_lines:
+            if re.match(r"^\s*\|[-:\s|]+\|\s*$", line):
+                continue  # skip separator row
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if cells:
+                data_rows.append(cells)
+        if len(data_rows) < 2:
+            return False
+        max_cols = max(len(r) for r in data_rows)
+        data_rows = [r + [""] * (max_cols - len(r)) for r in data_rows]
+        df = pd.DataFrame(data_rows[1:], columns=data_rows[0])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        return True
+    except Exception:
+        return False
+
+
+# ─── Field search callback ────────────────────────────────────────────────────
+
+def _search_for_field_name(key_prefix: str, i: int) -> None:
+    """on_change callback: runs the search whenever the field name widget changes."""
+    name = st.session_state.get(f"{key_prefix}_fname_{i}", "").strip()
+    results_key = f"{key_prefix}_field_results_{i}"
+    error_key = f"{key_prefix}_field_search_err_{i}"
+    # Clear previous state
+    st.session_state.pop(error_key, None)
+    if not name:
+        st.session_state.pop(results_key, None)
+        return
+    try:
+        hits = global_search(name, top_k=3, search_mode="both", min_confidence=0.1)
+        st.session_state[results_key] = hits          # [] = searched, no matches
+    except Exception as e:
+        st.session_state[results_key] = []            # treat as empty
+        st.session_state[error_key] = str(e)
+
+
 # ─── Field editor ─────────────────────────────────────────────────────────────
 
-def _render_field_editor(existing_fields: list | None = None) -> list:
+def _render_field_editor(existing_fields: list | None = None, key_prefix: str = "create") -> list:
     """
     Show a dynamic form for adding/editing template fields.
+    When a field name is entered, searches indexed documents and displays
+    matching passages in a table so the user can copy text into Description.
     Returns the final list of field dicts.
     """
-    if "template_fields" not in st.session_state:
-        st.session_state.template_fields = existing_fields or []
+    _fields_key = f"{key_prefix}_fields"
+    if _fields_key not in st.session_state:
+        st.session_state[_fields_key] = existing_fields or []
 
-    fields = st.session_state.template_fields
+    fields = st.session_state[_fields_key]
 
     st.markdown("#### Fields / Keywords")
-    st.caption("Each field defines a keyword or concept to extract from documents.")
+    st.caption(
+        "Enter a field name — matching content from your documents appears below. "
+        "Copy relevant text and paste it into the **Description** column."
+    )
 
     col_a, col_b, col_c, col_d = st.columns([3, 4, 2, 1])
     col_a.markdown("**Field Name**")
@@ -76,53 +141,124 @@ def _render_field_editor(existing_fields: list | None = None) -> list:
     col_d.markdown("")
 
     updated_fields = []
-    to_delete = set()
 
     for i, f in enumerate(fields):
         ca, cb, cc, cd = st.columns([3, 4, 2, 1])
-        name = ca.text_input("", value=f.get("name", ""), key=f"fname_{i}", label_visibility="collapsed")
-        desc = cb.text_input("", value=f.get("description", ""), key=f"fdesc_{i}", label_visibility="collapsed")
-        mode = cc.selectbox("", _SEARCH_MODES, index=_SEARCH_MODES.index(f.get("search_mode", "both")),
-                            key=f"fmode_{i}", label_visibility="collapsed")
-        if cd.button("✕", key=f"fdel_{i}", help="Remove this field"):
-            to_delete.add(i)
+
+        _name_key = f"{key_prefix}_fname_{i}"
+        name = ca.text_input(
+            "", value=f.get("name", ""), key=_name_key,
+            label_visibility="collapsed", placeholder="e.g. CBR Value",
+            on_change=_search_for_field_name, args=(key_prefix, i),
+        )
+
+        # For description: if a table was staged via "Use as Description", write it
+        # into the widget key BEFORE instantiation (pre-instantiation writes are allowed).
+        _desc_key = f"{key_prefix}_fdesc_{i}"
+        _desc_pending_key = f"{key_prefix}_fdesc_pending_{i}"
+        if _desc_pending_key in st.session_state:
+            st.session_state[_desc_key] = st.session_state.pop(_desc_pending_key)
+        desc = cb.text_area(
+            "", value=f.get("description", ""), key=_desc_key,
+            label_visibility="collapsed", placeholder="Paste text or table from results below…",
+            height=100,
+        )
+        mode = cc.selectbox(
+            "", _SEARCH_MODES,
+            index=_SEARCH_MODES.index(f.get("search_mode", "both")),
+            key=f"{key_prefix}_fmode_{i}", label_visibility="collapsed",
+        )
+
+        if cd.button("✕", key=f"{key_prefix}_fdel_{i}", help="Remove this field"):
+            for _k in [
+                f"{key_prefix}_field_results_{i}",
+                f"{key_prefix}_field_search_err_{i}",
+                _name_key,
+                _desc_key,
+                _desc_pending_key,
+                f"{key_prefix}_fmode_{i}",
+            ]:
+                st.session_state.pop(_k, None)
         else:
-            if name.strip():
-                updated_fields.append({"name": name.strip(), "description": desc.strip(), "search_mode": mode})
+            updated_fields.append({"name": name, "description": desc, "search_mode": mode})
 
-    st.session_state.template_fields = updated_fields
+            # Display search results (populated by on_change callback)
+            _results_key = f"{key_prefix}_field_results_{i}"
+            _error_key = f"{key_prefix}_field_search_err_{i}"
 
-    if st.button("➕ Add Field", key="add_field_btn"):
-        st.session_state.template_fields.append({"name": "", "description": "", "search_mode": "both"})
+            if name.strip() and _results_key not in st.session_state:
+                st.caption("↵ Press **Enter** or **Tab** to search documents.")
+            elif st.session_state.get(_error_key):
+                st.warning(f"Search error: {st.session_state[_error_key]}")
+            elif _results_key in st.session_state and not st.session_state[_results_key]:
+                st.caption("🔍 No matching content found — ensure documents are processed.")
+
+            hits = st.session_state.get(_results_key, [])
+            if hits and name.strip():
+                st.caption(f"Top {len(hits)} result(s) — use a result or paste its text into **Description**")
+                for j, r in enumerate(hits[:3]):
+                    conf = r.get("confidence", 0)
+                    badge = _CONFIDENCE_EMOJI.get(confidence_color(conf), "⚪")
+                    full_text = r.get("text", "")
+                    snippet = r.get("snippet") or full_text
+                    is_table = is_markdown_table(full_text)
+
+                    st.markdown(
+                        f"{badge} **{r.get('filename', 'Unknown')}** &nbsp;·&nbsp; "
+                        f"Page {r.get('page_number', '?')} &nbsp;·&nbsp; {conf:.0%}"
+                        + (" &nbsp;·&nbsp; 📊 *Table*" if is_table else "")
+                    )
+
+                    if is_table:
+                        # Render the table immediately (no expander needed for preview)
+                        _render_table_if_detected(full_text)
+                        if st.button(
+                            "📌 Use this table as Description",
+                            key=f"{key_prefix}_use_tbl_{i}_{j}",
+                        ):
+                            # Stage the value; consumed before the widget is created
+                            # on the next render to avoid the post-instantiation error.
+                            st.session_state[f"{key_prefix}_fdesc_pending_{i}"] = full_text
+                            st.rerun()
+                    else:
+                        st.markdown(f"> {truncate(snippet, 200)}")
+                        with st.expander("📖 Full text"):
+                            if not _render_table_if_detected(full_text):
+                                st.text(full_text)
+
+                    if j < len(hits[:3]) - 1:
+                        st.divider()
+
+    st.session_state[_fields_key] = updated_fields
+
+    if st.button("➕ Add Field", key=f"{key_prefix}_add_field_btn"):
+        st.session_state[_fields_key].append({"name": "", "description": "", "search_mode": "both"})
         st.rerun()
 
-    return st.session_state.template_fields
+    return st.session_state[_fields_key]
 
 
 # ─── Create / Edit form ───────────────────────────────────────────────────────
 
 def _create_template_tab():
     st.subheader("➕ Create New Template")
-    with st.form("create_template_form", clear_on_submit=True):
-        name = st.text_input("Template Name *", placeholder="e.g. Contract Summary")
-        desc = st.text_area("Description", placeholder="What this template extracts…", height=80)
-        st.form_submit_button("__placeholder__", disabled=True)  # invisible spacer
+    name = st.text_input("Template Name *", placeholder="e.g. Contract Summary", key="new_tmpl_name")
+    desc = st.text_area("Description", placeholder="What this template extracts…", height=80, key="new_tmpl_desc")
 
-    # Field editor lives outside the form (dynamic widgets)
-    _render_field_editor([])
+    _render_field_editor([], key_prefix="create")
 
-    fields = st.session_state.get("template_fields", [])
+    fields = [f for f in st.session_state.get("create_fields", []) if f.get("name", "").strip()]
     st.markdown("---")
     if st.button("💾 Save Template", type="primary", use_container_width=True, key="save_new_tmpl"):
         if not name.strip():
             st.error("Template name is required.")
         elif not fields:
-            st.error("Add at least one field.")
+            st.error("Add at least one field with a name.")
         else:
             try:
                 tid = create_template(name.strip(), desc.strip(), fields)
                 st.success(f"Template **{name}** created! (ID: {tid[:8]}…)")
-                st.session_state.template_fields = []
+                st.session_state["create_fields"] = []
                 st.rerun()
             except Exception as e:
                 st.error(f"Failed to create template: {e}")
@@ -141,14 +277,14 @@ def _edit_template_tab():
     if not tmpl:
         return
 
-    with st.form("edit_template_form"):
-        new_name = st.text_input("Name", value=tmpl["name"])
-        new_desc = st.text_area("Description", value=tmpl.get("description", ""), height=80)
-        st.form_submit_button("__placeholder__", disabled=True)
+    new_name = st.text_input("Name", value=tmpl["name"], key=f"edit_name_{tmpl['id']}")
+    new_desc = st.text_area("Description", value=tmpl.get("description", ""), height=80, key=f"edit_desc_{tmpl['id']}")
 
-    st.session_state.template_fields = list(tmpl.get("fields", []))
-    _render_field_editor(tmpl.get("fields", []))
-    fields = st.session_state.get("template_fields", [])
+    if st.session_state.get("edit_last_tmpl_id") != tmpl["id"]:
+        st.session_state["edit_fields"] = list(tmpl.get("fields", []))
+        st.session_state["edit_last_tmpl_id"] = tmpl["id"]
+    _render_field_editor(tmpl.get("fields", []), key_prefix="edit")
+    fields = st.session_state.get("edit_fields", [])
 
     col1, col2 = st.columns(2)
     with col1:

@@ -7,8 +7,8 @@ import pandas as pd
 import streamlit as st
 
 from config import APP_ICON, APP_TITLE, UPLOAD_DIR
-from modules.database import delete_document, get_document, get_entities, get_stats, list_documents
-from modules.vector_store import delete_document_vectors, get_vector_store_stats
+from modules.database import clear_all_data, delete_document, get_document, get_entities, get_stats, list_documents
+from modules.vector_store import clear_all_vectors, delete_document_vectors, get_vector_store_stats
 from utils.helpers import human_size, safe_json_loads, truncate
 
 st.set_page_config(page_title=f"Dashboard – {APP_TITLE}", page_icon="📊", layout="wide")
@@ -22,6 +22,10 @@ def _require_auth():
 
 def _sidebar():
     with st.sidebar:
+        st.markdown(
+            "<style>[data-testid=\"stSidebarNav\"]{display:none!important}</style>",
+            unsafe_allow_html=True,
+        )
         st.markdown(f"## {APP_ICON} {APP_TITLE}")
         st.page_link("app.py",                              label="🏠 Home")
         st.page_link("pages/1_📊_Dashboard.py",             label="📊 Dashboard")
@@ -29,6 +33,9 @@ def _sidebar():
         st.page_link("pages/3_📋_Template_Builder.py",      label="📋 Template Builder")
         st.page_link("pages/4_🔍_Search.py",                label="🔍 Search & Query")
         st.page_link("pages/5_📤_Export.py",                label="📤 Export")
+        st.page_link("pages/6_✅_Create_Checklist.py",          label="✅ Create Checklist")
+        st.page_link("pages/7_📝_Inspection.py",                label="📝 Inspection")
+        st.page_link("pages/8_📜_Conducted_Inspections.py",     label="📜 Conducted Inspections")
         st.divider()
         if st.button("🚪 Logout"):
             st.session_state.clear()
@@ -126,8 +133,19 @@ def main():
                 st.markdown("**Actions**")
                 if st.button("🔍 View Entities", key=f"ent_{doc['id']}"):
                     st.session_state[f"show_entities_{doc['id']}"] = True
-                if st.button("🗑️ Delete", key=f"del_{doc['id']}", type="secondary"):
-                    _delete_document(doc["id"], doc["filename"])
+                with st.popover("🗑️ Delete", use_container_width=True):
+                    st.warning(
+                        f"Permanently delete **{doc['filename']}**?\n\n"
+                        "This removes the file, all chunks, and all vectors. "
+                        "This cannot be undone."
+                    )
+                    if st.button(
+                        "Yes, delete permanently",
+                        key=f"confirm_del_{doc['id']}",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        _delete_document(doc["id"], doc["filename"])
 
             # Entity viewer
             if st.session_state.get(f"show_entities_{doc['id']}"):
@@ -156,6 +174,68 @@ def main():
             list(type_counts.items()), columns=["Type", "Count"]
         ).sort_values("Count", ascending=False)
         st.bar_chart(type_df.set_index("Type"))
+
+    # ── Danger Zone ───────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### ⚠️ Danger Zone")
+    st.caption("Irreversible actions that affect all application data.")
+
+    with st.popover("🔧 Repair Database", use_container_width=False):
+        st.warning(
+            "Use this if you see **'database disk image is malformed'** or other "
+            "SQLite errors. This rebuilds the database file from scratch.\n\n"
+            "**Documents, vectors, and uploaded files are preserved.** "
+            "Only SQLite metadata (documents list, chunks, templates, checklists, "
+            "inspections) is rebuilt — you will need to re-process any documents."
+        )
+        if st.button("Rebuild database", key="repair_db_btn", use_container_width=True):
+            try:
+                from modules.database import clear_all_data, init_db
+                clear_all_data()   # deletes the file and calls init_db()
+                st.success("Database rebuilt. Please re-process your documents.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Repair failed: {e}")
+
+    st.write("")  # spacer
+
+    with st.popover("🗑️ Clear All Data", use_container_width=False):
+        st.error(
+            "**This will permanently delete:**\n"
+            "- All documents, chunks, and vectors\n"
+            "- All templates and generated results\n"
+            "- All checklists and inspections\n"
+            "- All uploaded files on disk\n\n"
+            "This **cannot** be undone."
+        )
+        confirm_text = st.text_input(
+            "Type **DELETE** to confirm",
+            placeholder="DELETE",
+            key="clear_all_confirm",
+        )
+        if st.button(
+            "Yes, delete everything",
+            type="primary",
+            use_container_width=True,
+            key="clear_all_btn",
+            disabled=confirm_text.strip() != "DELETE",
+        ):
+            try:
+                # 1. Clear SQLite
+                clear_all_data()
+                # 2. Clear ChromaDB
+                clear_all_vectors()
+                # 3. Delete uploaded files
+                for f in UPLOAD_DIR.glob("*"):
+                    f.unlink(missing_ok=True)
+                # 4. Wipe data-related session state keys
+                for k in list(st.session_state.keys()):
+                    if k not in ("authenticated", "username", "dark_mode"):
+                        st.session_state.pop(k, None)
+                st.success("All data cleared.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Clear failed: {e}")
 
 
 if __name__ == "__main__":

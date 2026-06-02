@@ -102,6 +102,16 @@ def regex_ner(text: str) -> List[Dict]:
     return entities
 
 
+def is_markdown_table(text: str) -> bool:
+    """Return True if text contains a well-formed markdown table (≥2 data rows)."""
+    lines = [l for l in text.strip().split("\n") if l.strip()]
+    pipe_lines = [l for l in lines if "|" in l]
+    if len(pipe_lines) < 2:
+        return False
+    data_rows = [l for l in pipe_lines if not re.match(r"^\s*\|[-:\s|]+\|\s*$", l)]
+    return len(data_rows) >= 2
+
+
 def confidence_color(score: float) -> str:
     """Return a color string based on confidence score."""
     if score >= 0.75:

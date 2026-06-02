@@ -157,3 +157,14 @@ def get_vector_store_stats() -> Dict[str, int]:
 
 def collection_count() -> int:
     return get_vector_store_stats()["total_vectors"]
+
+
+def clear_all_vectors() -> None:
+    """Drop and recreate the ChromaDB collection, removing all vectors."""
+    try:
+        client = _get_chroma_client()
+        client.delete_collection("doc_chunks")
+    except Exception:
+        pass
+    # Clear Streamlit's resource cache so the collection is recreated fresh on next use.
+    st.cache_resource.clear()

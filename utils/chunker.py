@@ -110,12 +110,31 @@ def chunk_text(
     return chunks
 
 
+def _is_markdown_table(text: str) -> bool:
+    """True when most lines contain '|' — characteristic of a markdown table."""
+    lines = [l for l in text.strip().split("\n") if l.strip()]
+    if len(lines) < 2:
+        return False
+    pipe_lines = [l for l in lines if "|" in l]
+    return len(pipe_lines) >= max(2, len(lines) * 0.6)
+
+
 def chunk_by_page(pages: List[Tuple[int, str]], **kwargs) -> List[Dict]:
     """
     Chunk a list of (page_number, page_text) tuples, preserving page provenance.
+    Markdown table pages are stored as a single chunk to preserve their structure.
     """
     all_chunks: List[Dict] = []
     for page_num, page_text in pages:
-        page_chunks = chunk_text(page_text, page_number=page_num, **kwargs)
-        all_chunks.extend(page_chunks)
+        if _is_markdown_table(page_text):
+            all_chunks.append({
+                "text": page_text,
+                "page_number": page_num,
+                "char_start": 0,
+                "char_end": len(page_text),
+                "word_count": len(page_text.split()),
+            })
+        else:
+            page_chunks = chunk_text(page_text, page_number=page_num, **kwargs)
+            all_chunks.extend(page_chunks)
     return all_chunks
